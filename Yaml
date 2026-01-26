@@ -1,0 +1,103 @@
+name: Security Audit
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly on Sunday
+  push:
+    branches: [main]
+    paths:
+      - 'programs/**'
+      - 'Cargo.toml'
+      - 'package.json'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'programs/**'
+      - 'Cargo.toml'
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Install dependencies
+        run: |
+          npm install -g yarn
+          yarn install --frozen-lockfile
+
+      - name: Run cargo audit
+        uses: actions-rs/audit-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny
+
+      - name: Run cargo-deny
+        run: |
+          cargo deny check advisories
+          cargo deny check bans
+          cargo deny check licenses
+          cargo deny check sources
+
+      - name: Run npm audit
+        run: |
+          yarn audit --groups dependencies
+        continue-on-error: true
+
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: p/ci
+          output: semgrep-results.sarif
+
+      - name: Upload Semgrep results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: semgrep-results.sarif
+
+      - name: Run TruffleHog
+        uses: trufflesecurity/trufflehog@v3
+        with:
+          path: ./
+          base: ${{ github.event.pull_request.base.sha || github.sha }}
+          head: ${{ github.sha }}
+          extra_args: --debug --only-verified
+
+      - name: Run SLSA provenance
+        if: github.event_name == 'push'
+        uses: slsa-framework/github-actions-demo@main
+        with:
+          artifact_path: programs/
+          slsa_workflow_recepient: 'https://github.com/RIYPMoneytreebot/*'
+
+      - name: Generate SBOM
+        run: |
+          yarn licenses generate-disclaimer > sbom.txt
+          cargo sbom --format cyclonedx-json --output sbom-rs.json
+        continue-on-error: true
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v3
+        with:
+          name: sbom
+          path: |
+            sbom.txt
+            sbom-rs.json
